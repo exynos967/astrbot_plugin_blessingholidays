@@ -32,6 +32,10 @@
 
 -   `enabled`: 是否启用插件 (布尔型, 默认: `true`)。
 -   `llm_provider_id`: 选择用于生成祝福的 LLM 提供商（从 AstrBot WebUI 已配置提供商中选择）。
+-   `blessing_tone`: 祝福生成语气/风格设置 (对象，仅影响 LLM 生成内容)。
+    -   `preset`: 语气预设（默认 `warm`）。可选：`warm`/`formal`/`cute`/`humorous`/`poetic`/`energetic`/`business`/`simple`。
+    -   `custom_style`: 自定义语气补充（可选）。用于补充写作风格/称呼/禁忌等要求。
+    -   `custom_system_prompt`: 自定义 system prompt（可选）。若填写将优先使用（并自动追加“只输出祝福文本”的约束）；留空则使用内置 system prompt + 预设语气。
 -   `holidays_file`: 节假日数据缓存文件名 (字符串, 默认: `holidays.json`)。
 > 首次安装默认快速模式：预计算未来 7 天，整年在后台自动补齐（无需配置）。
 > 测试命令不再需要配置测试目标：它会基于当前会话推断（群聊触发→向该群发送，私聊触发→向该用户发送）。

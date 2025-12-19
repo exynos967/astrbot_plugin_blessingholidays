@@ -10,6 +10,41 @@
         "_special": "select_provider",
         "default": ""
     },
+    "blessing_tone": {
+        "description": "祝福生成语气/风格设置",
+        "type": "object",
+        "hint": "用于控制 LLM 生成祝福的写作语气。支持选择预设，也可通过自定义提示词精细控制。",
+        "items": {
+            "preset": {
+                "description": "语气预设",
+                "type": "string",
+                "options": [
+                    "warm",
+                    "formal",
+                    "cute",
+                    "humorous",
+                    "poetic",
+                    "energetic",
+                    "business",
+                    "simple"
+                ],
+                "default": "warm",
+                "hint": "选择一个内置预设（当 custom_system_prompt 为空时生效）。"
+            },
+            "custom_style": {
+                "description": "自定义语气补充（可选）",
+                "type": "text",
+                "default": "",
+                "hint": "用于补充写作风格/称呼/禁忌等要求，将附加到 system_prompt 与用户提示中。"
+            },
+            "custom_system_prompt": {
+                "description": "自定义 system prompt（可选）",
+                "type": "text",
+                "default": "",
+                "hint": "若填写，将优先使用该 system prompt（并自动追加“只输出祝福文本”的约束）。留空则使用内置 system prompt + 预设语气。"
+            }
+        }
+    },
     "holidays_file": {
         "description": "节假日数据文件名",
         "type": "string",
