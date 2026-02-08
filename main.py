@@ -825,7 +825,7 @@ class BlessingHolidaysPlugin(Star):
                                     )
                         except Exception as e:
                             self.logger.error(
-                                f"从平台 '{platform.meta.name}' 获取好友/群组列表失败: {e}"
+                                f"从平台 '{pname}' 获取好友/群组列表失败: {e}"
                             )
                     if sent_count > 0:
                         self.logger.info(
@@ -1069,7 +1069,7 @@ class BlessingHolidaysPlugin(Star):
 
                         pname = self._get_platform_name(platform)
                         self.logger.info(
-                            f"正在通过平台 '{platform.meta.name}' 发送假期结束提醒..."
+                            f"正在通过平台 '{pname}' 发送假期结束提醒..."
                         )
                         client = platform.get_client()
 
@@ -1120,7 +1120,7 @@ class BlessingHolidaysPlugin(Star):
                                     )
                         except Exception as e:
                             self.logger.error(
-                                f"从平台 '{platform.meta.name}' 获取好友/群组列表失败: {e}"
+                                f"从平台 '{pname}' 获取好友/群组列表失败: {e}"
                             )
 
                     if sent_count > 0:
