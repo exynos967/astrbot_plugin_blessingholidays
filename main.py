@@ -384,9 +384,6 @@ class BlessingHolidaysPlugin(Star):
         # LLM 选择（纯文本模式下用于生成祝福文案）
         self.llm_provider_id = str(config.get("llm_provider_id", "")).strip()
 
-        # 图片/文件传输相关配置已移除（纯文本模式）
-        # 发送间隔（硬编码，保持原有逻辑）
-
         self.holidays = []
         self.logger = logger
 
@@ -397,8 +394,9 @@ class BlessingHolidaysPlugin(Star):
         # 祝福生成语气/风格配置（影响 LLM 生成内容，不影响模板回退）
         self.tone_config = BlessingToneConfig.from_plugin_config(config)
 
-        # 在后台启动异步初始化任务
-        asyncio.create_task(self.initialize())
+        # 管理后台任务，避免插件重载后出现重复任务
+        self._background_tasks = set()
+        self._initialized = False
 
     def _get_platform_name(self, platform) -> str:
         """稳健获取平台名称，兼容 meta 为属性或可调用对象。"""
@@ -415,10 +413,96 @@ class BlessingHolidaysPlugin(Star):
         except Exception:
             return "unknown"
 
+    def _get_supported_client(self, platform):
+        """获取支持 call_action 的平台 client，不可用时返回 None。"""
+        try:
+            get_client = getattr(platform, "get_client", None)
+            if not callable(get_client):
+                return None
+            client = get_client()
+            if not client:
+                return None
+            api = getattr(client, "api", None)
+            if api is None or not hasattr(api, "call_action"):
+                return None
+            return client
+        except Exception:
+            return None
+
+    def _parse_send_time(
+        self,
+        send_time_str: str,
+        *,
+        default_hour: int,
+        default_minute: int,
+        scene_name: str,
+    ) -> tuple[int, int]:
+        """解析 HH:MM 时间配置，异常时回退到默认值。"""
+        try:
+            parts = str(send_time_str).split(":")
+            if len(parts) != 2:
+                raise ValueError("时间格式应为 HH:MM")
+            hour, minute = int(parts[0]), int(parts[1])
+            if not (0 <= hour <= 23 and 0 <= minute <= 59):
+                raise ValueError("时间取值越界")
+            return hour, minute
+        except Exception:
+            self.logger.warning(
+                f"{scene_name} 的发送时间配置无效({send_time_str})，已回退为 {default_hour:02d}:{default_minute:02d}。"
+            )
+            return default_hour, default_minute
+
+    def _extract_action_data_list(
+        self, action_result, *, action_name: str, platform_name: str
+    ) -> list:
+        """兼容 AstrBot/NapCat 返回体：支持 list 与 {'data': list} 两种结构。"""
+        if isinstance(action_result, list):
+            return action_result
+
+        if isinstance(action_result, dict):
+            data = action_result.get("data")
+            if isinstance(data, list):
+                return data
+
+            if action_result.get("status") == "failed":
+                self.logger.warning(
+                    f"平台 '{platform_name}' 调用 {action_name} 失败: retcode={action_result.get('retcode')}, message={action_result.get('message')}"
+                )
+                return []
+
+        self.logger.warning(
+            f"平台 '{platform_name}' 调用 {action_name} 返回了无法识别的数据结构: {type(action_result).__name__}"
+        )
+        return []
+
+    def _create_background_task(self, coroutine, task_name: str):
+        """创建并跟踪后台任务，统一处理异常与生命周期。"""
+        task = asyncio.create_task(coroutine)
+        self._background_tasks.add(task)
+
+        def _on_done(done_task):
+            self._background_tasks.discard(done_task)
+            if done_task.cancelled():
+                return
+            try:
+                exc = done_task.exception()
+            except Exception as err:
+                self.logger.error(f"后台任务 {task_name} 状态检查失败: {err}")
+                return
+            if exc:
+                self.logger.error(f"后台任务 {task_name} 异常退出: {exc}")
+
+        task.add_done_callback(_on_done)
+        return task
+
     async def initialize(self):
         """
         异步初始化插件，加载数据并启动后台任务。
         """
+        if self._initialized:
+            self.logger.info("插件已初始化，跳过重复初始化。")
+            return
+
         try:
             if not self.config.get("enabled", True):
                 self.logger.info("插件已在配置中禁用，跳过初始化。")
@@ -493,15 +577,22 @@ class BlessingHolidaysPlugin(Star):
                         )
                 self.holidays = quick_list
                 # 后台预热整年
-                asyncio.create_task(self._warm_holidays_full_year())
+                self._create_background_task(
+                    self._warm_holidays_full_year(), "warm_holidays_full_year"
+                )
 
             # 启动每日祝福检查的后台循环任务
-            asyncio.create_task(self.daily_blessing_checker())
+            self._create_background_task(
+                self.daily_blessing_checker(), "daily_blessing_checker"
+            )
 
             # 启动假期结束提醒的后台任务
             if self.end_of_holiday_config.get("enabled", False):
-                asyncio.create_task(self.end_of_holiday_checker())
+                self._create_background_task(
+                    self.end_of_holiday_checker(), "end_of_holiday_checker"
+                )
 
+            self._initialized = True
             self.logger.info("节假日祝福插件初始化完成。")
         except Exception as e:
             self.logger.error(f"插件初始化失败: {e}")
@@ -709,6 +800,15 @@ class BlessingHolidaysPlugin(Star):
         """
         插件终止时调用的清理方法。
         """
+        tasks = list(self._background_tasks)
+        if tasks:
+            self.logger.info(f"正在取消 {len(tasks)} 个后台任务...")
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        self._background_tasks.clear()
+        self._initialized = False
         self.logger.info("节假日祝福插件已销毁。")
 
     async def daily_blessing_checker(self):
@@ -721,10 +821,12 @@ class BlessingHolidaysPlugin(Star):
                 # --- 根据配置计算下次运行时间 ---
                 now = datetime.now()
                 send_time_str = self.start_of_holiday_config.get("send_time", "00:05")
-                try:
-                    hour, minute = map(int, send_time_str.split(":"))
-                except Exception:
-                    hour, minute = 0, 5
+                hour, minute = self._parse_send_time(
+                    send_time_str,
+                    default_hour=0,
+                    default_minute=5,
+                    scene_name="假期首日祝福",
+                )
                 target_time = now.replace(
                     hour=hour, minute=minute, second=0, microsecond=0
                 )
@@ -768,23 +870,33 @@ class BlessingHolidaysPlugin(Star):
                     sent_count = 0
                     all_platforms = self.context.platform_manager.get_insts()
                     for platform in all_platforms:
-                        # 仅针对支持 get_client 和 call_action 的平台 (如 aiocqhttp)
-                        if (
-                            not hasattr(platform, "get_client")
-                            or not platform.get_client()
-                            or not hasattr(platform.get_client().api, "call_action")
-                        ):
+                        client = self._get_supported_client(platform)
+                        if not client:
                             continue
+
                         pname = self._get_platform_name(platform)
                         self.logger.info(f"正在通过平台 '{pname}' 进行广播...")
-                        client = platform.get_client()
+
                         try:
-                            friend_list = await client.api.call_action(
+                            friend_list_raw = await client.api.call_action(
                                 "get_friend_list"
                             )
-                            group_list = await client.api.call_action("get_group_list")
+                            group_list_raw = await client.api.call_action("get_group_list")
+                            friend_list = self._extract_action_data_list(
+                                friend_list_raw,
+                                action_name="get_friend_list",
+                                platform_name=pname,
+                            )
+                            group_list = self._extract_action_data_list(
+                                group_list_raw,
+                                action_name="get_group_list",
+                                platform_name=pname,
+                            )
+
                             # 发送到好友
                             for friend in friend_list:
+                                if not isinstance(friend, dict):
+                                    continue
                                 user_id = friend.get("user_id")
                                 if not user_id:
                                     continue
@@ -803,8 +915,11 @@ class BlessingHolidaysPlugin(Star):
                                     self.logger.error(
                                         f"发送祝福到用户 {user_id} 失败: {e}"
                                     )
+
                             # 发送到群组
                             for group in group_list:
+                                if not isinstance(group, dict):
+                                    continue
                                 group_id = group.get("group_id")
                                 if not group_id:
                                     continue
@@ -1014,7 +1129,12 @@ class BlessingHolidaysPlugin(Star):
             try:
                 now = datetime.now()
                 send_time_str = self.end_of_holiday_config.get("send_time", "22:00")
-                hour, minute = map(int, send_time_str.split(":"))
+                hour, minute = self._parse_send_time(
+                    send_time_str,
+                    default_hour=22,
+                    default_minute=0,
+                    scene_name="假期结束提醒",
+                )
 
                 send_time = now.replace(
                     hour=hour, minute=minute, second=0, microsecond=0
@@ -1060,27 +1180,35 @@ class BlessingHolidaysPlugin(Star):
                     sent_count = 0
                     all_platforms = self.context.platform_manager.get_insts()
                     for platform in all_platforms:
-                        if (
-                            not hasattr(platform, "get_client")
-                            or not platform.get_client()
-                            or not hasattr(platform.get_client().api, "call_action")
-                        ):
+                        client = self._get_supported_client(platform)
+                        if not client:
                             continue
 
                         pname = self._get_platform_name(platform)
                         self.logger.info(
                             f"正在通过平台 '{pname}' 发送假期结束提醒..."
                         )
-                        client = platform.get_client()
 
                         try:
-                            friend_list = await client.api.call_action(
+                            friend_list_raw = await client.api.call_action(
                                 "get_friend_list"
                             )
-                            group_list = await client.api.call_action("get_group_list")
+                            group_list_raw = await client.api.call_action("get_group_list")
+                            friend_list = self._extract_action_data_list(
+                                friend_list_raw,
+                                action_name="get_friend_list",
+                                platform_name=pname,
+                            )
+                            group_list = self._extract_action_data_list(
+                                group_list_raw,
+                                action_name="get_group_list",
+                                platform_name=pname,
+                            )
 
                             # 发送到好友
                             for friend in friend_list:
+                                if not isinstance(friend, dict):
+                                    continue
                                 user_id = friend.get("user_id")
                                 if not user_id:
                                     continue
@@ -1101,6 +1229,8 @@ class BlessingHolidaysPlugin(Star):
 
                             # 发送到群组
                             for group in group_list:
+                                if not isinstance(group, dict):
+                                    continue
                                 group_id = group.get("group_id")
                                 if not group_id:
                                     continue
